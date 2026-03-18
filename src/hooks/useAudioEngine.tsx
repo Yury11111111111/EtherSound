@@ -1,13 +1,15 @@
 import { useRef, useCallback } from 'react';
 
 interface Voice {
+  id: symbol;
   oscillator: OscillatorNode;
   gain: GainNode;
+  isActive: boolean;
 }
 
-export const useAudioEngine = () => {
+export const useAudioEngine = (maxVoices = 32) => {
   const audioContextRef = useRef<AudioContext | null>(null);
-  const voiceRef = useRef<Voice | null>(null);
+  const voicesRef = useRef<Map<symbol, Voice>>(new Map());
 
   const getContext = useCallback(() => {
     if (!audioContextRef.current) {
@@ -16,24 +18,25 @@ export const useAudioEngine = () => {
     return audioContextRef.current;
   }, []);
 
-  const startVoice = useCallback(async () => {
+  const startVoice = useCallback(async (initialFrequency: number, initialVolume: number): Promise<symbol> => {
     const context = getContext();
-
     if (context.state === 'suspended') {
-     await context.resume();
-    } 
+      await context.resume();
+    }
 
-    if (voiceRef.current) {
-      stopVoice();
+    if (voicesRef.current.size >= maxVoices) {
+      const oldestId = voicesRef.current.keys().next().value;
+      if (oldestId) { 
+        removeVoice(oldestId);
+      }
     }
 
     const oscillator = context.createOscillator();
     const gain = context.createGain();
 
-    oscillator.type = 'sine'; 
-    oscillator.frequency.value = 440; 
-
-    gain.gain.value = 0; 
+    oscillator.type = 'sine';
+    oscillator.frequency.value = initialFrequency;
+    gain.gain.value = 0;
 
     oscillator.connect(gain);
     gain.connect(context.destination);
@@ -41,35 +44,44 @@ export const useAudioEngine = () => {
     oscillator.start();
 
     const now = context.currentTime;
-    gain.gain.linearRampToValueAtTime(0.5, now + 0.01);
+    gain.gain.linearRampToValueAtTime(initialVolume, now + 0.01);
 
-    voiceRef.current = { oscillator, gain };
-  }, [getContext]);
+    const id = Symbol();
+    voicesRef.current.set(id, { id, oscillator, gain, isActive: true });
 
-  const updateVoice = useCallback(({ frequency, volume }: { frequency: number; volume: number }) => {
-    const voice = voiceRef.current;
+    return id;
+  }, [getContext, maxVoices]);
+
+  const updateVoice = useCallback((id: symbol, frequency: number, volume: number) => {
+    const voice = voicesRef.current.get(id);
+    if (!voice || !voice.isActive) return;
+
     const context = audioContextRef.current;
-    if (!voice || !context) return;
+    if (!context) return;
 
     const now = context.currentTime;
-
     voice.oscillator.frequency.linearRampToValueAtTime(frequency, now + 0.02);
     voice.gain.gain.linearRampToValueAtTime(volume, now + 0.02);
   }, []);
 
-  const stopVoice = useCallback(() => {
-    const voice = voiceRef.current;
+  const removeVoice = useCallback((id: symbol) => {
+    const voice = voicesRef.current.get(id);
+    if (!voice || !voice.isActive) return;
+
     const context = audioContextRef.current;
-    if (!voice || !context) return;
+    if (context) {
+      const now = context.currentTime;
+      voice.gain.gain.linearRampToValueAtTime(0, now + 0.05);
+      voice.oscillator.stop(now + 0.06);
+    }
 
-    const now = context.currentTime;
-
-    voice.gain.gain.linearRampToValueAtTime(0, now + 0.05);
-
-    voice.oscillator.stop(now + 0.06);
-
-    voiceRef.current = null;
+    voice.isActive = false;
+    voicesRef.current.delete(id);
   }, []);
 
-  return { startVoice, updateVoice, stopVoice };
+  const stopAllVoices = useCallback(() => {
+    voicesRef.current.forEach((_, id) => removeVoice(id));
+  }, [removeVoice]);
+
+  return { startVoice, updateVoice, removeVoice, stopAllVoices };
 };
